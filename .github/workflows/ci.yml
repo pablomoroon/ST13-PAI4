@@ -1,0 +1,72 @@
+
+name: PAI4 - DevSecOps
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke-test:
+    name: Preparar y probar Juice Shop
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Descargar repositorio
+        uses: actions/checkout@v4
+
+      - name: Comprobar archivos del proyecto
+        run: |
+          test -f package.json
+          test -f Dockerfile
+          echo "Archivos de Juice Shop encontrados"
+
+      - name: Descargar imagen Docker
+        run: |
+          docker pull bkimminich/juice-shop:v20.4.0
+
+      - name: Iniciar Juice Shop
+        run: |
+          docker run -d \
+            --name pai4-juice-shop \
+            -p 127.0.0.1:3000:3000 \
+            bkimminich/juice-shop:v20.4.0
+
+      - name: Comprobar que la aplicación funciona
+        run: |
+          for intento in {1..30}; do
+            if curl -fsS http://127.0.0.1:3000/ > /dev/null; then
+              echo "Juice Shop responde correctamente"
+              exit 0
+            fi
+            sleep 3
+          done
+
+          echo "ERROR: Juice Shop no responde"
+          exit 1
+
+      - name: Guardar logs de Juice Shop
+        if: always()
+        run: |
+          mkdir -p evidencias
+          docker logs pai4-juice-shop \
+            > evidencias/juice-shop.log 2>&1 || true
+
+      - name: Subir evidencias
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: evidencia-smoke-test
+          path: evidencias/
+          if-no-files-found: warn
+
+      - name: Detener Juice Shop
+        if: always()
+        run: |
+          docker rm -f pai4-juice-shop || true
