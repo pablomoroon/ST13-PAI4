@@ -13,20 +13,20 @@ permissions:
 
 jobs:
   dast:
-    name: Analisis DAST con OWASP ZAP
+    name: DAST - ZAP y Quality Gate
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 35
+
+    env:
+      ZAP_GATE_MIN_RISK: "3"
 
     steps:
-      # 1. Descargar el proyecto
       - name: Descargar repositorio
         uses: actions/checkout@v4
 
-      # 2. Preparar la red Docker
-      - name: Crear red Docker
+      - name: Preparar red Docker
         run: docker network create pai4-net
 
-      # 3. Arrancar la aplicacion vulnerable
       - name: Iniciar Juice Shop
         run: |
           docker run -d --rm \
@@ -35,51 +35,55 @@ jobs:
             -p 127.0.0.1:3000:3000 \
             bkimminich/juice-shop:v20.4.0
 
-      # 4. Esperar a que responda
-      - name: Comprobar Juice Shop
+      - name: Esperar a Juice Shop
         run: |
           for intento in {1..30}; do
             if curl -fsS http://127.0.0.1:3000/ > /dev/null; then
-              echo "Juice Shop funciona correctamente"
+              echo "Juice Shop funcionando"
               exit 0
             fi
             sleep 3
           done
-          echo "ERROR: Juice Shop no responde"
           exit 1
 
-      # 5. Ejecutar OWASP ZAP
-      - name: Analisis DAST - ZAP Baseline
+      - name: Ejecutar ZAP Full Scan
         run: |
           mkdir -p zap-reports
           chmod 777 zap-reports
 
           set +e
+
           docker run --rm \
             --network pai4-net \
             -v "$PWD/zap-reports:/zap/wrk/:rw" \
             ghcr.io/zaproxy/zaproxy:stable \
-            zap-baseline.py \
+            zap-full-scan.py \
             -t http://pai4-juice-shop:3000 \
             -m 2 \
+            -j \
             -J zap-report.json \
             -r zap-report.html \
             -I \
+            -z "-config scanner.maxScanDurationInMins=8 -config scanner.maxRuleDurationInMins=2" \
             2>&1 | tee zap-reports/zap-console.log
 
           resultado=${PIPESTATUS[0]}
+
           set -e
 
           echo "Codigo de salida ZAP: $resultado"
 
-          if [ "$resultado" -ge 3 ]; then
-            echo "ERROR: ZAP no pudo ejecutarse"
+          if [ "$resultado" -ne 0 ]; then
+            echo "ERROR: El analisis ZAP no termino correctamente"
             exit 1
           fi
 
           test -s zap-reports/zap-report.json
 
-      # 6. Guardar logs de la aplicacion
+      - name: Evaluar Quality Gate
+        run: |
+          python3 scripts/evaluar_gate_zap.py
+
       - name: Guardar logs de Juice Shop
         if: always()
         run: |
@@ -87,19 +91,17 @@ jobs:
           docker logs pai4-juice-shop \
             > evidencias/juice-shop.log 2>&1 || true
 
-      # 7. Guardar todos los informes
       - name: Subir evidencias
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: evidencias-dast-zap
+          name: evidencias-dast-quality-gate
           path: |
             zap-reports/
             evidencias/
           if-no-files-found: warn
 
-      # 8. Limpiar contenedores
-      - name: Limpiar Docker
+      - name: Limpiar contenedores
         if: always()
         run: |
           docker rm -f pai4-juice-shop || true
