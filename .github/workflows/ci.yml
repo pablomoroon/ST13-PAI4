@@ -46,10 +46,12 @@ jobs:
           done
           exit 1
 
-      - name: Ejecutar ZAP Full Scan
+       - name: Ejecutar ZAP con alcance limitado
         run: |
           mkdir -p zap-reports
           chmod 777 zap-reports
+
+          cp zap-plan.yaml zap-reports/zap-plan.yaml
 
           set +e
 
@@ -57,14 +59,7 @@ jobs:
             --network pai4-net \
             -v "$PWD/zap-reports:/zap/wrk/:rw" \
             ghcr.io/zaproxy/zaproxy:stable \
-            zap-full-scan.py \
-            -t http://pai4-juice-shop:3000 \
-            -m 2 \
-            -j \
-            -J zap-report.json \
-            -r zap-report.html \
-            -I \
-            -z "-config scanner.maxScanDurationInMins=8 -config scanner.maxRuleDurationInMins=2" \
+            zap.sh -cmd -autorun /zap/wrk/zap-plan.yaml \
             2>&1 | tee zap-reports/zap-console.log
 
           resultado=${PIPESTATUS[0]}
@@ -73,12 +68,62 @@ jobs:
 
           echo "Codigo de salida ZAP: $resultado"
 
-          if [ "$resultado" -ne 0 ]; then
-            echo "ERROR: El analisis ZAP no termino correctamente"
+          # 2 significa advertencias no bloqueantes.
+          if [ "$resultado" -ne 0 ] && [ "$resultado" -ne 2 ]; then
+            echo "ERROR: Fallo tecnico en ZAP"
             exit 1
           fi
 
           test -s zap-reports/zap-report.json
+          test -s zap-reports/zap-report.html
+
+
+      - name: Verificar alcance del informe ZAP
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          from urllib.parse import urlsplit
+
+          ruta = Path("zap-reports/zap-report.json")
+          datos = json.loads(ruta.read_text(encoding="utf-8"))
+
+          sitios = datos.get("site", [])
+          assert sitios, "El informe no contiene sitios"
+
+          for sitio in sitios:
+              url = sitio.get("@name", "")
+              parsed = urlsplit(url)
+
+              assert (
+                  parsed.scheme == "http"
+                  and parsed.hostname == "pai4-juice-shop"
+                  and parsed.port == 3000
+              ), f"Sitio no autorizado en el informe: {url}"
+
+              for alerta in sitio.get("alerts", []):
+                  for instancia in alerta.get("instances", []):
+                      uri = instancia.get("uri", "")
+                      origen = urlsplit(uri)
+                      assert (
+                          origen.scheme == "http"
+                          and origen.hostname == "pai4-juice-shop"
+                          and origen.port == 3000
+                      ), f"Hallazgo fuera del alcance: {uri}"
+
+          mensaje = (
+              "ALCANCE VALIDADO\n"
+              "Todos los sitios y hallazgos del informe "
+              "pertenecen a Juice Shop.\n"
+          )
+
+          print(mensaje)
+
+          Path("zap-reports/alcance-resultado.txt").write_text(
+              mensaje, encoding="utf-8"
+          )
+          PY
+
 
       - name: Evaluar Quality Gate
         run: |
