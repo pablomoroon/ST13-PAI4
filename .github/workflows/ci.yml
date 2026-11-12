@@ -12,45 +12,74 @@ permissions:
   contents: read
 
 jobs:
-  smoke-test:
-    name: Preparar y probar Juice Shop
+  dast:
+    name: Analisis DAST con OWASP ZAP
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
 
     steps:
+      # 1. Descargar el proyecto
       - name: Descargar repositorio
         uses: actions/checkout@v4
 
-      - name: Comprobar archivos del proyecto
-        run: |
-          test -f package.json
-          test -f Dockerfile
-          echo "Archivos de Juice Shop encontrados"
+      # 2. Preparar la red Docker
+      - name: Crear red Docker
+        run: docker network create pai4-net
 
-      - name: Descargar imagen Docker
-        run: |
-          docker pull bkimminich/juice-shop:v20.4.0
-
+      # 3. Arrancar la aplicacion vulnerable
       - name: Iniciar Juice Shop
         run: |
-          docker run -d \
+          docker run -d --rm \
             --name pai4-juice-shop \
+            --network pai4-net \
             -p 127.0.0.1:3000:3000 \
             bkimminich/juice-shop:v20.4.0
 
-      - name: Comprobar que la aplicación funciona
+      # 4. Esperar a que responda
+      - name: Comprobar Juice Shop
         run: |
           for intento in {1..30}; do
             if curl -fsS http://127.0.0.1:3000/ > /dev/null; then
-              echo "Juice Shop responde correctamente"
+              echo "Juice Shop funciona correctamente"
               exit 0
             fi
             sleep 3
           done
-
           echo "ERROR: Juice Shop no responde"
           exit 1
 
+      # 5. Ejecutar OWASP ZAP
+      - name: Analisis DAST - ZAP Baseline
+        run: |
+          mkdir -p zap-reports
+          chmod 777 zap-reports
+
+          set +e
+          docker run --rm \
+            --network pai4-net \
+            -v "$PWD/zap-reports:/zap/wrk/:rw" \
+            ghcr.io/zaproxy/zaproxy:stable \
+            zap-baseline.py \
+            -t http://pai4-juice-shop:3000 \
+            -m 2 \
+            -J zap-report.json \
+            -r zap-report.html \
+            -I \
+            2>&1 | tee zap-reports/zap-console.log
+
+          resultado=${PIPESTATUS[0]}
+          set -e
+
+          echo "Codigo de salida ZAP: $resultado"
+
+          if [ "$resultado" -ge 3 ]; then
+            echo "ERROR: ZAP no pudo ejecutarse"
+            exit 1
+          fi
+
+          test -s zap-reports/zap-report.json
+
+      # 6. Guardar logs de la aplicacion
       - name: Guardar logs de Juice Shop
         if: always()
         run: |
@@ -58,15 +87,20 @@ jobs:
           docker logs pai4-juice-shop \
             > evidencias/juice-shop.log 2>&1 || true
 
+      # 7. Guardar todos los informes
       - name: Subir evidencias
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: evidencia-smoke-test
-          path: evidencias/
+          name: evidencias-dast-zap
+          path: |
+            zap-reports/
+            evidencias/
           if-no-files-found: warn
 
-      - name: Detener Juice Shop
+      # 8. Limpiar contenedores
+      - name: Limpiar Docker
         if: always()
         run: |
           docker rm -f pai4-juice-shop || true
+          docker network rm pai4-net || true
