@@ -21,12 +21,17 @@ jobs:
       ZAP_GATE_MIN_RISK: "3"
 
     steps:
+
+      # 1. DESCARGAR REPOSITORIO
       - name: Descargar repositorio
         uses: actions/checkout@v4
 
+      # 2. PREPARAR RED DOCKER
       - name: Preparar red Docker
-        run: docker network create pai4-net
+        run: |
+          docker network create pai4-net
 
+      # 3. INICIAR JUICE SHOP
       - name: Iniciar Juice Shop
         run: |
           docker run -d --rm \
@@ -35,6 +40,7 @@ jobs:
             -p 127.0.0.1:3000:3000 \
             bkimminich/juice-shop:v20.4.0
 
+      # 4. ESPERAR A QUE LA APLICACION RESPONDA
       - name: Esperar a Juice Shop
         run: |
           for intento in {1..30}; do
@@ -44,15 +50,21 @@ jobs:
             fi
             sleep 3
           done
+
+          echo "ERROR: Juice Shop no responde"
           exit 1
 
-       - name: Ejecutar ZAP con alcance limitado
+      # 5. EJECUTAR ZAP CON ALCANCE LIMITADO
+      - name: Ejecutar ZAP con alcance limitado
         run: |
           mkdir -p zap-reports
           chmod 777 zap-reports
 
+          # Copiar plan de ZAP
+          test -f zap-plan.yaml
           cp zap-plan.yaml zap-reports/zap-plan.yaml
 
+          # Ejecutar analisis DAST
           set +e
 
           docker run --rm \
@@ -63,21 +75,25 @@ jobs:
             2>&1 | tee zap-reports/zap-console.log
 
           resultado=${PIPESTATUS[0]}
-
           set -e
 
           echo "Codigo de salida ZAP: $resultado"
 
-          # 2 significa advertencias no bloqueantes.
+          # 0 = correcto
+          # 1 = error
+          # 2 = advertencias
           if [ "$resultado" -ne 0 ] && [ "$resultado" -ne 2 ]; then
-            echo "ERROR: Fallo tecnico en ZAP"
+            echo "ERROR: ZAP no termino correctamente"
             exit 1
           fi
 
+          # Comprobar informes generados
           test -s zap-reports/zap-report.json
           test -s zap-reports/zap-report.html
 
+          echo "Informes de ZAP generados"
 
+      # 6. COMPROBAR ALCANCE DE LOS RESULTADOS
       - name: Verificar alcance del informe ZAP
         run: |
           python3 - <<'PY'
@@ -86,56 +102,78 @@ jobs:
           from urllib.parse import urlsplit
 
           ruta = Path("zap-reports/zap-report.json")
-          datos = json.loads(ruta.read_text(encoding="utf-8"))
+
+          datos = json.loads(
+              ruta.read_text(encoding="utf-8")
+          )
 
           sitios = datos.get("site", [])
-          assert sitios, "El informe no contiene sitios"
 
-          for sitio in sitios:
-              url = sitio.get("@name", "")
+          if not sitios:
+              raise SystemExit(
+                  "ERROR: El informe no contiene sitios"
+              )
+
+          total = 0
+
+          def comprobar_url(url):
               parsed = urlsplit(url)
 
-              assert (
+              if not (
                   parsed.scheme == "http"
                   and parsed.hostname == "pai4-juice-shop"
                   and parsed.port == 3000
-              ), f"Sitio no autorizado en el informe: {url}"
+              ):
+                  raise SystemExit(
+                      f"ERROR: URL fuera de alcance: {url}"
+                  )
+
+          for sitio in sitios:
+              comprobar_url(sitio.get("@name", ""))
 
               for alerta in sitio.get("alerts", []):
-                  for instancia in alerta.get("instances", []):
-                      uri = instancia.get("uri", "")
-                      origen = urlsplit(uri)
-                      assert (
-                          origen.scheme == "http"
-                          and origen.hostname == "pai4-juice-shop"
-                          and origen.port == 3000
-                      ), f"Hallazgo fuera del alcance: {uri}"
+                  total += 1
+
+                  for instancia in alerta.get(
+                      "instances", []
+                  ):
+                      comprobar_url(
+                          instancia.get("uri", "")
+                      )
 
           mensaje = (
               "ALCANCE VALIDADO\n"
-              "Todos los sitios y hallazgos del informe "
-              "pertenecen a Juice Shop.\n"
+              "Objetivo: http://pai4-juice-shop:3000\n"
+              f"Tipos de alertas: {total}\n"
+              "No aparecen hallazgos externos "
+              "en el informe.\n"
           )
 
           print(mensaje)
 
-          Path("zap-reports/alcance-resultado.txt").write_text(
-              mensaje, encoding="utf-8"
+          Path(
+              "zap-reports/alcance-resultado.txt"
+          ).write_text(
+              mensaje,
+              encoding="utf-8"
           )
           PY
 
-
+      # 7. EVALUAR QUALITY GATE BLOQUEANTE
       - name: Evaluar Quality Gate
         run: |
           python3 scripts/evaluar_gate_zap.py
 
+      # 8. GUARDAR LOGS DE JUICE SHOP
       - name: Guardar logs de Juice Shop
         if: always()
         run: |
           mkdir -p evidencias
+
           docker logs pai4-juice-shop \
             > evidencias/juice-shop.log 2>&1 || true
 
+      # 9. SUBIR TODAS LAS EVIDENCIAS
       - name: Subir evidencias
         if: always()
         uses: actions/upload-artifact@v4
@@ -145,7 +183,9 @@ jobs:
             zap-reports/
             evidencias/
           if-no-files-found: warn
+          retention-days: 30
 
+      # 10. LIMPIAR CONTENEDORES
       - name: Limpiar contenedores
         if: always()
         run: |
