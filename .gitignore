@@ -71,3 +71,17 @@ config/*.yml
 # Misc
 .playwright-mcp/
 cypress/screenshots/
+
+
+# PAI 4 - DevSecOps
+
+# Credenciales locales
+.env
+.env.*
+!.env.example
+
+# Informes generados
+zap-reports/
+
+# Evidencias guardadas localmente
+evidencias/
