@@ -15,56 +15,73 @@ jobs:
   dast:
     name: DAST - ZAP y Quality Gate
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 50
 
     env:
       ZAP_GATE_MIN_RISK: "3"
 
     steps:
 
-      # 1. DESCARGAR REPOSITORIO
+      # 1. DESCARGAR EL REPOSITORIO
       - name: Descargar repositorio
         uses: actions/checkout@v4
 
-      # 2. PREPARAR RED DOCKER
+      # 2. PREPARAR LA RED DOCKER
       - name: Preparar red Docker
         run: |
           docker network create pai4-net
 
-      # 3. INICIAR JUICE SHOP
+      # 3. CONSTRUIR JUICE SHOP DESDE EL CODIGO FUENTE
+      - name: Construir imagen Docker de Juice Shop
+        run: |
+          test -f Dockerfile
+          test -f package.json
+
+          docker build \
+            --tag pai4-juice-shop:ci \
+            --file Dockerfile \
+            .
+
+          echo "Imagen Docker construida correctamente"
+
+      # 4. INICIAR JUICE SHOP
       - name: Iniciar Juice Shop
         run: |
           docker run -d --rm \
             --name pai4-juice-shop \
             --network pai4-net \
             -p 127.0.0.1:3000:3000 \
-            bkimminich/juice-shop:v20.4.0
+            pai4-juice-shop:ci
 
-      # 4. ESPERAR A QUE LA APLICACION RESPONDA
+      # 5. COMPROBAR QUE LA APLICACION RESPONDE
       - name: Esperar a Juice Shop
         run: |
           for intento in {1..30}; do
             if curl -fsS http://127.0.0.1:3000/ > /dev/null; then
-              echo "Juice Shop funcionando"
+              echo "Juice Shop funcionando correctamente"
               exit 0
             fi
+
             sleep 3
           done
 
           echo "ERROR: Juice Shop no responde"
+          docker logs pai4-juice-shop || true
           exit 1
 
-      # 5. EJECUTAR ZAP CON ALCANCE LIMITADO
+      # 6. EJECUTAR ZAP CON ALCANCE LIMITADO
       - name: Ejecutar ZAP con alcance limitado
         run: |
           mkdir -p zap-reports
           chmod 777 zap-reports
 
-          # Copiar plan de ZAP
+          # Comprobar el plan de seguridad
           test -f zap-plan.yaml
+
+          # Copiar la configuracion de ZAP
           cp zap-plan.yaml zap-reports/zap-plan.yaml
 
-          # Ejecutar analisis DAST
+          # Ejecutar escaneo DAST
           set +e
 
           docker run --rm \
@@ -75,25 +92,24 @@ jobs:
             2>&1 | tee zap-reports/zap-console.log
 
           resultado=${PIPESTATUS[0]}
+
           set -e
 
           echo "Codigo de salida ZAP: $resultado"
 
-          # 0 = correcto
-          # 1 = error
-          # 2 = advertencias
+          # Admitir ejecuciones con advertencias
           if [ "$resultado" -ne 0 ] && [ "$resultado" -ne 2 ]; then
             echo "ERROR: ZAP no termino correctamente"
             exit 1
           fi
 
-          # Comprobar informes generados
+          # Comprobar que se generaron los informes
           test -s zap-reports/zap-report.json
           test -s zap-reports/zap-report.html
 
-          echo "Informes de ZAP generados"
+          echo "Informes ZAP generados correctamente"
 
-      # 6. COMPROBAR ALCANCE DE LOS RESULTADOS
+      # 7. VERIFICAR QUE ZAP SOLO REPORTA JUICE SHOP
       - name: Verificar alcance del informe ZAP
         run: |
           python3 - <<'PY'
@@ -111,10 +127,10 @@ jobs:
 
           if not sitios:
               raise SystemExit(
-                  "ERROR: El informe no contiene sitios"
+                  "ERROR: El informe ZAP no contiene sitios"
               )
 
-          total = 0
+          total_alertas = 0
 
           def comprobar_url(url):
               parsed = urlsplit(url)
@@ -129,10 +145,12 @@ jobs:
                   )
 
           for sitio in sitios:
-              comprobar_url(sitio.get("@name", ""))
+              comprobar_url(
+                  sitio.get("@name", "")
+              )
 
               for alerta in sitio.get("alerts", []):
-                  total += 1
+                  total_alertas += 1
 
                   for instancia in alerta.get(
                       "instances", []
@@ -144,9 +162,9 @@ jobs:
           mensaje = (
               "ALCANCE VALIDADO\n"
               "Objetivo: http://pai4-juice-shop:3000\n"
-              f"Tipos de alertas: {total}\n"
-              "No aparecen hallazgos externos "
-              "en el informe.\n"
+              f"Tipos de alertas: {total_alertas}\n"
+              "Todos los hallazgos del informe "
+              "pertenecen a Juice Shop.\n"
           )
 
           print(mensaje)
@@ -159,12 +177,12 @@ jobs:
           )
           PY
 
-      # 7. EVALUAR QUALITY GATE BLOQUEANTE
+      # 8. EVALUAR QUALITY GATE BLOQUEANTE
       - name: Evaluar Quality Gate
         run: |
           python3 scripts/evaluar_gate_zap.py
 
-      # 8. GUARDAR LOGS DE JUICE SHOP
+      # 9. GUARDAR LOS LOGS DE JUICE SHOP
       - name: Guardar logs de Juice Shop
         if: always()
         run: |
@@ -173,7 +191,7 @@ jobs:
           docker logs pai4-juice-shop \
             > evidencias/juice-shop.log 2>&1 || true
 
-      # 9. SUBIR TODAS LAS EVIDENCIAS
+      # 10. SUBIR TODOS LOS INFORMES Y EVIDENCIAS
       - name: Subir evidencias
         if: always()
         uses: actions/upload-artifact@v4
@@ -185,7 +203,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
 
-      # 10. LIMPIAR CONTENEDORES
+      # 11. LIMPIAR LOS CONTENEDORES
       - name: Limpiar contenedores
         if: always()
         run: |
