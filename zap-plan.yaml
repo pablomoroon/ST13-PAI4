@@ -6,22 +6,26 @@ env:
         - http://pai4-juice-shop:3000
       includePaths:
         - 'http://pai4-juice-shop:3000(?:/.*)?'
+
   parameters:
     failOnError: true
     failOnWarning: false
     progressToStdout: true
 
 jobs:
+  # Configurar analisis pasivo
   - type: passiveScan-config
     parameters:
       scanOnlyInScope: true
       maxAlertsPerRule: 10
 
+  # Rastreo tradicional
   - type: spider
     parameters:
       context: juice-shop
       maxDuration: 2
 
+  # Rastreo de la aplicacion web
   - type: spiderClient
     parameters:
       context: juice-shop
@@ -29,10 +33,12 @@ jobs:
       numberOfBrowsers: 1
       scopeCheck: Strict
 
+  # Esperar los resultados pasivos
   - type: passiveScan-wait
     parameters:
       maxDuration: 2
 
+  # Analisis activo de seguridad
   - type: activeScan
     parameters:
       context: juice-shop
@@ -43,6 +49,7 @@ jobs:
     parameters:
       maxDuration: 2
 
+  # Informe JSON para quality gate
   - type: report
     parameters:
       template: traditional-json
@@ -52,11 +59,22 @@ jobs:
     sites:
       - http://pai4-juice-shop:3000
 
+  # Informe HTML para evidencias
   - type: report
     parameters:
       template: traditional-html
       reportDir: /zap/wrk
       reportFile: zap-report.html
+      reportTitle: PAI4 DAST Juice Shop
+    sites:
+      - http://pai4-juice-shop:3000
+
+  # Informe XML para DefectDojo
+  - type: report
+    parameters:
+      template: traditional-xml
+      reportDir: /zap/wrk
+      reportFile: zap-report.xml
       reportTitle: PAI4 DAST Juice Shop
     sites:
       - http://pai4-juice-shop:3000

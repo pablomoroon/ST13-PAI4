@@ -22,16 +22,16 @@ jobs:
 
     steps:
 
-      # 1. DESCARGAR EL REPOSITORIO
+      # 1. DESCARGAR REPOSITORIO
       - name: Descargar repositorio
         uses: actions/checkout@v4
 
-      # 2. PREPARAR LA RED DOCKER
+      # 2. PREPARAR RED DOCKER
       - name: Preparar red Docker
         run: |
           docker network create pai4-net
 
-      # 3. CONSTRUIR JUICE SHOP DESDE EL CODIGO FUENTE
+      # 3. CONSTRUIR JUICE SHOP
       - name: Construir imagen Docker de Juice Shop
         run: |
           test -f Dockerfile
@@ -53,7 +53,7 @@ jobs:
             -p 127.0.0.1:3000:3000 \
             pai4-juice-shop:ci
 
-      # 5. COMPROBAR QUE LA APLICACION RESPONDE
+      # 5. COMPROBAR DISPONIBILIDAD
       - name: Esperar a Juice Shop
         run: |
           for intento in {1..30}; do
@@ -69,19 +69,16 @@ jobs:
           docker logs pai4-juice-shop || true
           exit 1
 
-      # 6. EJECUTAR ZAP CON ALCANCE LIMITADO
+      # 6. EJECUTAR OWASP ZAP
       - name: Ejecutar ZAP con alcance limitado
         run: |
           mkdir -p zap-reports
           chmod 777 zap-reports
 
-          # Comprobar el plan de seguridad
           test -f zap-plan.yaml
 
-          # Copiar la configuracion de ZAP
           cp zap-plan.yaml zap-reports/zap-plan.yaml
 
-          # Ejecutar escaneo DAST
           set +e
 
           docker run --rm \
@@ -92,24 +89,47 @@ jobs:
             2>&1 | tee zap-reports/zap-console.log
 
           resultado=${PIPESTATUS[0]}
-
           set -e
 
           echo "Codigo de salida ZAP: $resultado"
 
-          # Admitir ejecuciones con advertencias
+          # 0: correcto
+          # 1: error del plan
+          # 2: advertencias
           if [ "$resultado" -ne 0 ] && [ "$resultado" -ne 2 ]; then
             echo "ERROR: ZAP no termino correctamente"
             exit 1
           fi
 
-          # Comprobar que se generaron los informes
+          # Comprobar los tres informes
           test -s zap-reports/zap-report.json
           test -s zap-reports/zap-report.html
+          test -s zap-reports/zap-report.xml
 
-          echo "Informes ZAP generados correctamente"
+          # Validar XML para DefectDojo
+          python3 - <<'PYXML'
+          from pathlib import Path
+          from xml.etree import ElementTree as ET
 
-      # 7. VERIFICAR QUE ZAP SOLO REPORTA JUICE SHOP
+          ruta = Path("zap-reports/zap-report.xml")
+          raiz = ET.parse(ruta).getroot()
+
+          if raiz.tag != "OWASPZAPReport":
+              raise SystemExit(
+                  f"ERROR: Formato XML inesperado: {raiz.tag}"
+              )
+
+          if not raiz.findall("site"):
+              raise SystemExit(
+                  "ERROR: XML de ZAP sin sitios analizados"
+              )
+
+          print("XML tradicional de ZAP verificado")
+          PYXML
+
+          echo "Informes JSON, HTML y XML generados"
+
+      # 7. COMPROBAR ALCANCE DEL ANALISIS
       - name: Verificar alcance del informe ZAP
         run: |
           python3 - <<'PY'
@@ -145,9 +165,7 @@ jobs:
                   )
 
           for sitio in sitios:
-              comprobar_url(
-                  sitio.get("@name", "")
-              )
+              comprobar_url(sitio.get("@name", ""))
 
               for alerta in sitio.get("alerts", []):
                   total_alertas += 1
@@ -177,12 +195,12 @@ jobs:
           )
           PY
 
-      # 8. EVALUAR QUALITY GATE BLOQUEANTE
+      # 8. QUALITY GATE BLOQUEANTE
       - name: Evaluar Quality Gate
         run: |
           python3 scripts/evaluar_gate_zap.py
 
-      # 9. GUARDAR LOS LOGS DE JUICE SHOP
+      # 9. GUARDAR LOGS
       - name: Guardar logs de Juice Shop
         if: always()
         run: |
@@ -191,7 +209,7 @@ jobs:
           docker logs pai4-juice-shop \
             > evidencias/juice-shop.log 2>&1 || true
 
-      # 10. SUBIR TODOS LOS INFORMES Y EVIDENCIAS
+      # 10. GUARDAR INFORMES Y EVIDENCIAS
       - name: Subir evidencias
         if: always()
         uses: actions/upload-artifact@v4
@@ -203,7 +221,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
 
-      # 11. LIMPIAR LOS CONTENEDORES
+      # 11. LIMPIAR CONTENEDORES
       - name: Limpiar contenedores
         if: always()
         run: |
