@@ -227,3 +227,68 @@ jobs:
         run: |
           docker rm -f pai4-juice-shop || true
           docker network rm pai4-net || true
+
+  defectdojo:
+    name: Importar resultados en DefectDojo
+    needs: dast
+    if: >-
+      always() &&
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' ||
+       github.event_name == 'workflow_dispatch')
+    runs-on: [self-hosted, Linux, X64, defectdojo]
+    timeout-minutes: 10
+
+    steps:
+      - name: Descargar evidencias DAST
+        uses: actions/download-artifact@v4
+        with:
+          name: evidencias-dast-quality-gate
+          path: evidencias-dast-quality-gate
+
+      - name: Comprobar informe XML
+        run: |
+          test -s evidencias-dast-quality-gate/zap-reports/zap-report.xml
+          echo "Informe XML encontrado"
+
+      - name: Importar análisis en DefectDojo
+        env:
+          DD_API_KEY: ${{ secrets.DEFECTDOJO_API_KEY }}
+          DD_URL: http://localhost:8080
+        run: |
+          set -euo pipefail
+
+          if [ -z "$DD_API_KEY" ]; then
+            echo "ERROR: No se ha configurado DEFECTDOJO_API_KEY"
+            exit 1
+          fi
+
+          TEST_TITLE="PAI4 - ZAP - Run ${GITHUB_RUN_NUMBER} - Attempt ${GITHUB_RUN_ATTEMPT} - ${GITHUB_SHA:0:7}"
+
+          curl --fail-with-body -sS -X POST \
+            "${DD_URL}/api/v2/import-scan/" \
+            -H "Authorization: Token ${DD_API_KEY}" \
+            -F "scan_type=ZAP Scan" \
+            -F "engagement=1" \
+            -F "test_title=${TEST_TITLE}" \
+            -F "file=@evidencias-dast-quality-gate/zap-reports/zap-report.xml" \
+            -o respuesta-defectdojo.json
+
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          respuesta = json.loads(
+              Path("respuesta-defectdojo.json").read_text()
+          )
+
+          test_id = respuesta.get("test_id")
+
+          if not test_id:
+              raise SystemExit(
+                  "ERROR: DefectDojo no ha devuelto un test_id válido"
+              )
+
+          print(f"Importación correcta. Test ID: {test_id}")
+          print(f"Hallazgos importados: {respuesta.get('statistics', {}).get('after', {}).get('total', {}).get('total', 'No disponible')}")
+          PY
